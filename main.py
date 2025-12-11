@@ -1,6 +1,7 @@
 from fastmcp import FastMCP
 import os
-import sqlite3
+import asyncio
+import aiosqlite
 from datetime import datetime
 from typing import Any, Dict, List, Optional, Union
 
@@ -10,9 +11,10 @@ CATEGORIES_PATH = os.path.join(os.path.dirname(__file__), "categories.json")
 # Create a FastMCP server instance
 mcp = FastMCP(name="Expense Tracker MCP Server")
 
-def init_db():
-    with sqlite3.connect(DB_PATH) as c:
-        c.execute("""
+async def init_db() -> None:
+    async with aiosqlite.connect(DB_PATH) as c:
+        await c.execute(
+            """
             CREATE TABLE IF NOT EXISTS expenses(
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 date TEXT NOT NULL,
@@ -23,10 +25,12 @@ def init_db():
                 type TEXT NOT NULL DEFAULT 'expense',
                 is_deleted INTEGER NOT NULL DEFAULT 0
             )
-        """)
+            """
+        )
+        await c.commit()
 
 
-init_db()
+asyncio.run(init_db())
 
 
 def _validate_date(date_str: str) -> bool:
@@ -45,7 +49,7 @@ def _validate_amount(amount: float) -> bool:
 
 # ADD EXPENSE
 @mcp.tool()
-def add_expense(amount: float, category: str, subcategory: str, note: str, date: str) -> Dict[str, Any]:
+async def add_expense(amount: float, category: str, subcategory: str, note: str, date: str) -> Dict[str, Any]:
     """Add a new expense entry."""
     subcategory = subcategory or ""
     note = note or ""
@@ -54,22 +58,18 @@ def add_expense(amount: float, category: str, subcategory: str, note: str, date:
         return {"status": "error", "message": "Invalid amount"}
     if not _validate_date(date):
         return {"status": "error", "message": "Invalid date format. Use YYYY-MM-DD"}
-    with sqlite3.connect(DB_PATH) as conn:
-        cursor = conn.cursor()
-        cursor.execute(
+    async with aiosqlite.connect(DB_PATH) as conn:
+        cursor = await conn.execute(
             "INSERT INTO expenses (amount, category, subcategory, note, date, type) VALUES (?, ?, ?, ?, ?, 'expense')",
             (amount, category, subcategory, note, date)
         )
-        return {
-            "status": "success",
-            "id": cursor.lastrowid,
-            "message": "Expense added successfully"
-        }
+        await conn.commit()
+        return {"status": "success", "id": cursor.lastrowid, "message": "Expense added successfully"}
 
 
 # ADD CREDIT (INCOME)
 @mcp.tool()
-def add_credit(amount: float, source: str, note: str, date: str) -> Dict[str, Any]:
+async def add_credit(amount: float, source: str, note: str, date: str) -> Dict[str, Any]:
     """Add an income/credit (e.g., salary)."""
     note = note or ""
 
@@ -77,46 +77,46 @@ def add_credit(amount: float, source: str, note: str, date: str) -> Dict[str, An
         return {"status": "error", "message": "Invalid amount"}
     if not _validate_date(date):
         return {"status": "error", "message": "Invalid date format. Use YYYY-MM-DD"}
-    with sqlite3.connect(DB_PATH) as conn:
-        cursor = conn.cursor()
-        cursor.execute(
+    async with aiosqlite.connect(DB_PATH) as conn:
+        cursor = await conn.execute(
             "INSERT INTO expenses (amount, category, subcategory, note, date, type) VALUES (?, ?, '', ?, ?, 'income')",
             (amount, source, note, date)
         )
-        return {
-            "status": "success",
-            "id": cursor.lastrowid,
-            "message": "Credit added successfully"
-        }
+        await conn.commit()
+        return {"status": "success", "id": cursor.lastrowid, "message": "Credit added successfully"}
 
 
 # LIST EXPENSES / INCOME
 @mcp.tool()
-def list_expenses(start_date: str, end_date: str) -> Union[Dict[str, Any], List[Dict[str, Any]]]:
+async def list_expenses(start_date: str, end_date: str) -> Union[Dict[str, Any], List[Dict[str, Any]]]:
     """List all expense entries within an inclusive date range."""
     if not (_validate_date(start_date) and _validate_date(end_date)):
         return {"status": "error", "message": "Invalid date range format. Use YYYY-MM-DD"}
 
-    with sqlite3.connect(DB_PATH) as c:
-        c.row_factory = sqlite3.Row
-        cur = c.execute("""
+    async with aiosqlite.connect(DB_PATH) as c:
+        c.row_factory = aiosqlite.Row
+        cur = await c.execute(
+            """
             SELECT id, date, amount, category, subcategory, note, type
             FROM expenses
             WHERE date BETWEEN ? AND ? AND is_deleted = 0
             ORDER BY date ASC, id ASC
-        """, (start_date, end_date))
-        return [dict(row) for row in cur.fetchall()]
+            """,
+            (start_date, end_date),
+        )
+        rows = await cur.fetchall()
+        return [dict(row) for row in rows]
 
 
 # SUMMARIZE EXPENSES
 @mcp.tool()
-def summarize(start_date: str, end_date: str, category: Optional[str] = None) -> Union[Dict[str, Any], List[Dict[str, Any]]]:
+async def summarize(start_date: str, end_date: str, category: Optional[str] = None) -> Union[Dict[str, Any], List[Dict[str, Any]]]:
     """Summarize expenses by category within an inclusive date range (expense only)."""
     if not (_validate_date(start_date) and _validate_date(end_date)):
         return {"status": "error", "message": "Invalid date range format. Use YYYY-MM-DD"}
 
-    with sqlite3.connect(DB_PATH) as c:
-        c.row_factory = sqlite3.Row
+    async with aiosqlite.connect(DB_PATH) as c:
+        c.row_factory = aiosqlite.Row
         query = """
             SELECT category, SUM(amount) AS total_amount
             FROM expenses
@@ -130,8 +130,8 @@ def summarize(start_date: str, end_date: str, category: Optional[str] = None) ->
 
         query += " GROUP BY category ORDER BY category ASC"
 
-        cur = c.execute(query, params)
-        results = [dict(row) for row in cur.fetchall()]
+        cur = await c.execute(query, params)
+        results = [dict(row) for row in await cur.fetchall()]
         # ensure total_amount is float
         for r in results:
             if "total_amount" in r and r["total_amount"] is not None:
@@ -141,11 +141,10 @@ def summarize(start_date: str, end_date: str, category: Optional[str] = None) ->
 
 # EDIT EXPENSE / INCOME
 @mcp.tool()
-def edit_expense(id: int, amount: Optional[float] = None, category: Optional[str] = None, subcategory: Optional[str] = None,
+async def edit_expense(id: int, amount: Optional[float] = None, category: Optional[str] = None, subcategory: Optional[str] = None,
                  note: Optional[str] = None, date: Optional[str] = None) -> Dict[str, Any]:
     """Edit an existing expense or income entry."""
-    with sqlite3.connect(DB_PATH) as conn:
-        cursor = conn.cursor()
+    async with aiosqlite.connect(DB_PATH) as conn:
 
         # Build dynamic update query
         fields: List[str] = []
@@ -181,9 +180,8 @@ def edit_expense(id: int, amount: Optional[float] = None, category: Optional[str
         params.append(id)
 
         query = f"UPDATE expenses SET {', '.join(fields)} WHERE id = ?"
-
-        cursor.execute(query, params)
-
+        cursor = await conn.execute(query, params)
+        await conn.commit()
         if cursor.rowcount == 0:
             return {"status": "error", "message": "Expense not found"}
 
@@ -192,15 +190,14 @@ def edit_expense(id: int, amount: Optional[float] = None, category: Optional[str
 
 # SOFT DELETE — mark the entry as hidden
 @mcp.tool()
-def delete_expense(id: int) -> Dict[str, Any]:
+async def delete_expense(id: int) -> Dict[str, Any]:
     """Soft delete: hides an entry without removing it."""
-    with sqlite3.connect(DB_PATH) as conn:
-        cursor = conn.cursor()
-        cursor.execute(
+    async with aiosqlite.connect(DB_PATH) as conn:
+        cursor = await conn.execute(
             "UPDATE expenses SET is_deleted = 1 WHERE id = ?",
             (id,)
         )
-
+        await conn.commit()
         if cursor.rowcount == 0:
             return {"status": "error", "message": "Entry not found"}
 
@@ -208,15 +205,14 @@ def delete_expense(id: int) -> Dict[str, Any]:
     
 
 @mcp.tool()
-def restore_expense(id: int) -> Dict[str, Any]:
+async def restore_expense(id: int) -> Dict[str, Any]:
     """Restore a previously deleted entry."""
-    with sqlite3.connect(DB_PATH) as conn:
-        cursor = conn.cursor()
-        cursor.execute(
+    async with aiosqlite.connect(DB_PATH) as conn:
+        cursor = await conn.execute(
             "UPDATE expenses SET is_deleted = 0 WHERE id = ?",
             (id,)
         )
-
+        await conn.commit()
         if cursor.rowcount == 0:
             return {"status": "error", "message": "Entry not found or already active"}
 
@@ -226,10 +222,9 @@ def restore_expense(id: int) -> Dict[str, Any]:
 
 # CATEGORIES RESOURCE
 @mcp.resource("expense://categories", mime_type="application/json")
-def categories():
+async def categories() -> str:
     """Serve categories.json as a resource."""
-    with open(CATEGORIES_PATH, "r", encoding="utf-8") as f:
-        return f.read()
+    return await asyncio.to_thread(lambda: open(CATEGORIES_PATH, "r", encoding="utf-8").read())
 
 # RUN SERVER
 if __name__ == "__main__":
