@@ -13,24 +13,31 @@ mcp = FastMCP(name="Expense Tracker MCP Server")
 
 async def init_db() -> None:
     async with aiosqlite.connect(DB_PATH) as c:
-        await c.execute(
-            """
-            CREATE TABLE IF NOT EXISTS expenses(
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                date TEXT NOT NULL,
-                amount REAL NOT NULL,
-                category TEXT NOT NULL,
-                subcategory TEXT DEFAULT '',
-                note TEXT DEFAULT '',
-                type TEXT NOT NULL DEFAULT 'expense',
-                is_deleted INTEGER NOT NULL DEFAULT 0
-            )
-            """
-        )
+        await c.execute("""
+    CREATE TABLE IF NOT EXISTS expenses(
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        date TEXT NOT NULL,
+        amount REAL NOT NULL,
+        category TEXT NOT NULL,
+        subcategory TEXT DEFAULT '',
+        note TEXT DEFAULT '',
+        type TEXT NOT NULL DEFAULT 'expense',
+        is_deleted INTEGER NOT NULL DEFAULT 0
+    )
+""")
         await c.commit()
+_db_initialized: bool = False
+_db_init_lock: asyncio.Lock = asyncio.Lock()
 
-
-asyncio.run(init_db())
+async def ensure_db() -> None:
+    global _db_initialized
+    if _db_initialized:
+        return
+    async with _db_init_lock:
+        if _db_initialized:
+            return
+        await init_db()
+        _db_initialized = True
 
 
 def _validate_date(date_str: str) -> bool:
@@ -51,6 +58,7 @@ def _validate_amount(amount: float) -> bool:
 @mcp.tool()
 async def add_expense(amount: float, category: str, subcategory: str, note: str, date: str) -> Dict[str, Any]:
     """Add a new expense entry."""
+    await ensure_db()
     subcategory = subcategory or ""
     note = note or ""
 
@@ -71,6 +79,7 @@ async def add_expense(amount: float, category: str, subcategory: str, note: str,
 @mcp.tool()
 async def add_credit(amount: float, source: str, note: str, date: str) -> Dict[str, Any]:
     """Add an income/credit (e.g., salary)."""
+    await ensure_db()
     note = note or ""
 
     if not _validate_amount(amount):
@@ -90,6 +99,7 @@ async def add_credit(amount: float, source: str, note: str, date: str) -> Dict[s
 @mcp.tool()
 async def list_expenses(start_date: str, end_date: str) -> Union[Dict[str, Any], List[Dict[str, Any]]]:
     """List all expense entries within an inclusive date range."""
+    await ensure_db()
     if not (_validate_date(start_date) and _validate_date(end_date)):
         return {"status": "error", "message": "Invalid date range format. Use YYYY-MM-DD"}
 
@@ -112,6 +122,7 @@ async def list_expenses(start_date: str, end_date: str) -> Union[Dict[str, Any],
 @mcp.tool()
 async def summarize(start_date: str, end_date: str, category: Optional[str] = None) -> Union[Dict[str, Any], List[Dict[str, Any]]]:
     """Summarize expenses by category within an inclusive date range (expense only)."""
+    await ensure_db()
     if not (_validate_date(start_date) and _validate_date(end_date)):
         return {"status": "error", "message": "Invalid date range format. Use YYYY-MM-DD"}
 
@@ -144,6 +155,7 @@ async def summarize(start_date: str, end_date: str, category: Optional[str] = No
 async def edit_expense(id: int, amount: Optional[float] = None, category: Optional[str] = None, subcategory: Optional[str] = None,
                  note: Optional[str] = None, date: Optional[str] = None) -> Dict[str, Any]:
     """Edit an existing expense or income entry."""
+    await ensure_db()
     async with aiosqlite.connect(DB_PATH) as conn:
 
         # Build dynamic update query
@@ -192,6 +204,7 @@ async def edit_expense(id: int, amount: Optional[float] = None, category: Option
 @mcp.tool()
 async def delete_expense(id: int) -> Dict[str, Any]:
     """Soft delete: hides an entry without removing it."""
+    await ensure_db()
     async with aiosqlite.connect(DB_PATH) as conn:
         cursor = await conn.execute(
             "UPDATE expenses SET is_deleted = 1 WHERE id = ?",
@@ -207,6 +220,7 @@ async def delete_expense(id: int) -> Dict[str, Any]:
 @mcp.tool()
 async def restore_expense(id: int) -> Dict[str, Any]:
     """Restore a previously deleted entry."""
+    await ensure_db()
     async with aiosqlite.connect(DB_PATH) as conn:
         cursor = await conn.execute(
             "UPDATE expenses SET is_deleted = 0 WHERE id = ?",
